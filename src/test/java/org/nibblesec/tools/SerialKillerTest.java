@@ -3,8 +3,10 @@ package org.nibblesec.tools;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.equalTo;
+import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.not;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
 
@@ -12,6 +14,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InvalidClassException;
+import java.lang.reflect.Proxy;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.file.Files;
@@ -19,6 +22,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 
 import org.junit.Test;
+import org.nibblesec.tools.util.TestInvocationHandler;
 
 /**
  * SerialKillerTest
@@ -118,5 +122,81 @@ public class SerialKillerTest {
 
             assertEquals(42, stream.readObject());
         }
+    }
+
+    @Test
+    public void testProxyBlacklisted() throws Exception {
+        byte[] serializedProxy = serializeProxy(java.util.Comparator.class);
+
+        try (ObjectInputStream stream = new SerialKiller(new ByteArrayInputStream(serializedProxy), "src/test/resources/serialkiller.conf")) {
+            try {
+                stream.readObject();
+                fail();
+            } catch (InvalidClassException expected) {
+                assertThat(expected.getMessage(), containsString("blocked"));
+                assertThat(expected.getMessage(), containsString("blacklist"));
+                assertThat(expected.getMessage(), not(containsString("whitelist")));
+                assertThat(expected.classname, equalTo("java.util.Comparator"));
+            } catch (ClassNotFoundException e) {
+                fail(e.getMessage());
+            }
+        }
+    }
+
+    @Test
+    public void testProxyNonWhitelisted() throws Exception {
+        byte[] serializedProxy = serializeProxy(java.io.Serializable.class);
+
+        try (ObjectInputStream stream = new SerialKiller(new ByteArrayInputStream(serializedProxy), "src/test/resources/serialkiller.conf")) {
+            try {
+                stream.readObject();
+                fail();
+            } catch (InvalidClassException expected) {
+                assertThat(expected.getMessage(), containsString("blocked"));
+                assertThat(expected.getMessage(), containsString("whitelist"));
+                assertThat(expected.getMessage(), not(containsString("blacklist")));
+                assertThat(expected.classname, equalTo("java.io.Serializable"));
+            } catch (ClassNotFoundException e) {
+                fail(e.getMessage());
+            }
+        }
+    }
+
+    @Test
+    public void testProxyWhitelisted() throws Exception {
+        byte[] serializedProxy = serializeProxy(java.lang.Comparable.class);
+
+        try (ObjectInputStream stream = new SerialKiller(new ByteArrayInputStream(serializedProxy), "src/test/resources/whitelist-all.conf")) {
+            Object deserialized = stream.readObject();
+
+            assertTrue(Proxy.isProxyClass(deserialized.getClass()));
+            assertThat(Proxy.getInvocationHandler(deserialized), instanceOf(TestInvocationHandler.class));
+        }
+    }
+
+    @Test
+    public void testProxyProfilingModeDoesNotBlock() throws Exception {
+        byte[] serializedProxy = serializeProxy(java.util.Comparator.class);
+
+        try (ObjectInputStream stream = new SerialKiller(new ByteArrayInputStream(serializedProxy), "src/test/resources/profiling.conf")) {
+            Object deserialized = stream.readObject();
+
+            assertTrue(Proxy.isProxyClass(deserialized.getClass()));
+        }
+    }
+
+    private byte[] serializeProxy(Class<?>... proxyInterfaces) throws Exception {
+        Object proxy = Proxy.newProxyInstance(
+                getClass().getClassLoader(),
+                proxyInterfaces,
+                new TestInvocationHandler("proxy-target"));
+
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+
+        try (ObjectOutputStream stream = new ObjectOutputStream(bytes)) {
+            stream.writeObject(proxy);
+        }
+
+        return bytes.toByteArray();
     }
 }
